@@ -1,11 +1,16 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabase";
 import { Auction, Participant } from "@/lib/types";
 import FloorplanViewer from "@/components/FloorplanViewer";
 import StatusBoard from "@/components/StatusBoard";
+
+interface StoredParticipant {
+  name: string;
+  email: string;
+  token: string;
+}
 
 export default function AuctionDashboard() {
   const params = useParams();
@@ -14,47 +19,54 @@ export default function AuctionDashboard() {
 
   const [auction, setAuction] = useState<Auction | null>(null);
   const [participants, setParticipants] = useState<Participant[]>([]);
+  const [storedParticipants, setStoredParticipants] = useState<StoredParticipant[]>([]);
   const [loading, setLoading] = useState(true);
   const [solving, setSolving] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Load stored participant tokens from localStorage
+  useEffect(() => {
+    const stored = localStorage.getItem(`auction_participants_${auctionId}`);
+    if (stored) {
+      try {
+        setStoredParticipants(JSON.parse(stored));
+      } catch {
+        // ignore parse errors
+      }
+    }
+  }, [auctionId]);
 
   const fetchData = useCallback(async () => {
-    const [auctionRes, participantsRes] = await Promise.all([
-      supabase.from("auctions").select().eq("id", auctionId).single(),
-      supabase.from("participants").select().eq("auction_id", auctionId),
-    ]);
+    try {
+      const res = await fetch(`/api/auction/${auctionId}`);
+      if (!res.ok) {
+        setLoading(false);
+        return;
+      }
+      const data = await res.json();
+      setAuction(data.auction);
+      setParticipants(data.participants);
 
-    if (auctionRes.data) setAuction(auctionRes.data);
-    if (participantsRes.data) setParticipants(participantsRes.data);
+      // Redirect to results if completed
+      if (data.auction?.status === "completed") {
+        router.push(`/auction/${auctionId}/results`);
+      }
+    } catch {
+      // network error — will retry on next poll
+    }
     setLoading(false);
-  }, [auctionId]);
+  }, [auctionId, router]);
 
   useEffect(() => {
     fetchData();
-
-    const channel = supabase
-      .channel(`auction-${auctionId}`)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "participants", filter: `auction_id=eq.${auctionId}` },
-        () => fetchData()
-      )
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "auctions", filter: `id=eq.${auctionId}` },
-        (payload) => {
-          if (payload.new && (payload.new as Auction).status === "completed") {
-            router.push(`/auction/${auctionId}/results`);
-          }
-        }
-      )
-      .subscribe();
-
+    // Poll every 5 seconds for status updates (replaces realtime subscription)
+    pollRef.current = setInterval(fetchData, 5000);
     return () => {
-      supabase.removeChannel(channel);
+      if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [auctionId, fetchData, router]);
+  }, [fetchData]);
 
   const allSubmitted = participants.length > 0 && participants.every((p) => p.has_submitted);
 
@@ -62,10 +74,15 @@ export default function AuctionDashboard() {
     setSolving(true);
     setError("");
     try {
+      // Use a stored participant token for authorization
+      const authToken = storedParticipants[0]?.token;
+      if (!authToken) {
+        throw new Error("No authorization token available. You must access this page from the auction creation flow.");
+      }
       const res = await fetch("/api/solve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ auctionId }),
+        body: JSON.stringify({ auctionId, token: authToken }),
       });
       if (!res.ok) {
         const data = await res.json();
@@ -79,10 +96,19 @@ export default function AuctionDashboard() {
     }
   };
 
-  const copyLink = (token: string, name: string) => {
+  const getToken = (participantName: string, participantEmail: string) => {
+    const stored = storedParticipants.find(
+      (sp) => sp.name === participantName && sp.email === participantEmail
+    );
+    return stored?.token;
+  };
+
+  const copyLink = (participantName: string, participantEmail: string) => {
+    const token = getToken(participantName, participantEmail);
+    if (!token) return;
     const url = `${window.location.origin}/bid/${token}`;
     navigator.clipboard.writeText(url);
-    setCopied(name);
+    setCopied(participantName);
     setTimeout(() => setCopied(null), 2000);
   };
 
@@ -102,20 +128,27 @@ export default function AuctionDashboard() {
     );
   }
 
+  const hasTokens = storedParticipants.length > 0;
+
   return (
     <main className="min-h-screen bg-[#FAFAFA]">
       {/* Top bar */}
       <header className="border-b border-zinc-200 bg-white">
         <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-zinc-900 flex items-center justify-center">
-              <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-              </svg>
-            </div>
-            <span className="font-semibold text-zinc-900 text-lg tracking-tight">Apt Divider</span>
+            <a href="/" className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-zinc-900 flex items-center justify-center">
+                <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                </svg>
+              </div>
+              <span className="font-semibold text-zinc-900 text-lg tracking-tight">Apt Divider</span>
+            </a>
           </div>
           <div className="flex items-center gap-3">
+            <a href="/about" className="text-xs text-zinc-400 hover:text-zinc-600 font-medium transition-colors">
+              How it works
+            </a>
             <span className="text-sm font-mono text-zinc-500 bg-zinc-100 px-3 py-1 rounded-full">
               ${Number(auction.rent_total).toLocaleString()}/mo
             </span>
@@ -150,28 +183,37 @@ export default function AuctionDashboard() {
             <div className="px-5 py-4 border-b border-zinc-100">
               <h3 className="font-semibold text-zinc-900">Invite Links</h3>
               <p className="text-xs text-zinc-400 mt-0.5">
-                Each person gets a unique, private link
+                {hasTokens
+                  ? "Each person gets a unique, private link"
+                  : "Links were shared when this auction was created"}
               </p>
             </div>
             <div className="divide-y divide-zinc-50">
-              {participants.map((p) => (
-                <div key={p.id} className="flex items-center justify-between px-5 py-3.5">
-                  <div className="min-w-0">
-                    <div className="font-medium text-zinc-900 text-sm">{p.name}</div>
-                    <div className="text-xs text-zinc-400 truncate">{p.email}</div>
+              {participants.map((p) => {
+                const token = getToken(p.name, p.email);
+                return (
+                  <div key={p.id} className="flex items-center justify-between px-5 py-3.5">
+                    <div className="min-w-0">
+                      <div className="font-medium text-zinc-900 text-sm">{p.name}</div>
+                      <div className="text-xs text-zinc-400 truncate">{p.email}</div>
+                    </div>
+                    {token ? (
+                      <button
+                        onClick={() => copyLink(p.name, p.email)}
+                        className={`text-xs font-medium px-3 py-1.5 rounded-lg transition-all flex-shrink-0 ml-3 ${
+                          copied === p.name
+                            ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                            : "bg-zinc-900 text-white hover:bg-zinc-800"
+                        }`}
+                      >
+                        {copied === p.name ? "Copied!" : "Copy Link"}
+                      </button>
+                    ) : (
+                      <span className="text-xs text-zinc-400 ml-3">Link shared</span>
+                    )}
                   </div>
-                  <button
-                    onClick={() => copyLink(p.access_token, p.name)}
-                    className={`text-xs font-medium px-3 py-1.5 rounded-lg transition-all flex-shrink-0 ml-3 ${
-                      copied === p.name
-                        ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                        : "bg-zinc-900 text-white hover:bg-zinc-800"
-                    }`}
-                  >
-                    {copied === p.name ? "Copied!" : "Copy Link"}
-                  </button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 
@@ -188,9 +230,9 @@ export default function AuctionDashboard() {
           )}
           <button
             onClick={handleSolve}
-            disabled={!allSubmitted || solving}
+            disabled={!allSubmitted || solving || !hasTokens}
             className={`px-8 py-3.5 font-semibold rounded-xl shadow-sm transition-all ${
-              allSubmitted
+              allSubmitted && hasTokens
                 ? "bg-emerald-600 text-white hover:bg-emerald-700 active:bg-emerald-800"
                 : "bg-zinc-100 text-zinc-400 cursor-not-allowed"
             }`}

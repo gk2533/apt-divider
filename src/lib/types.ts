@@ -19,7 +19,7 @@ export interface Participant {
   auction_id: string;
   name: string;
   email: string;
-  access_token: string;
+  access_token?: string;
   has_submitted: boolean;
 }
 

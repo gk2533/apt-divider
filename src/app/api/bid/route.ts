@@ -8,11 +8,14 @@ export async function POST(request: NextRequest) {
     bids: { roomId: string; value: number }[];
   };
 
-  if (!token || !bids || bids.length !== 3) {
-    return NextResponse.json({ error: "Invalid bid submission" }, { status: 400 });
+  if (!token || typeof token !== "string") {
+    return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+  }
+  if (!bids || !Array.isArray(bids) || bids.length !== 3) {
+    return NextResponse.json({ error: "Must bid on all 3 rooms" }, { status: 400 });
   }
 
-  // Look up participant
+  // Look up participant by token
   const { data: participant, error: pError } = await supabase
     .from("participants")
     .select("*, auctions(*)")
@@ -20,21 +23,43 @@ export async function POST(request: NextRequest) {
     .single();
 
   if (pError || !participant) {
-    return NextResponse.json({ error: "Invalid token" }, { status: 404 });
+    // Generic error — don't reveal whether token exists
+    return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
 
   if (participant.auctions.status === "completed") {
     return NextResponse.json({ error: "Auction already completed" }, { status: 400 });
   }
 
-  // Validate all bid values are non-negative
+  // Fetch the actual room IDs for this auction to validate against
+  const { data: auctionRooms } = await supabase
+    .from("rooms")
+    .select("id")
+    .eq("auction_id", participant.auction_id);
+
+  const validRoomIds = new Set((auctionRooms || []).map((r) => r.id));
+  const rentTotal = Number(participant.auctions.rent_total);
+
+  // Validate each bid
   for (const bid of bids) {
-    if (bid.value < 0) {
-      return NextResponse.json({ error: "Bids must be non-negative" }, { status: 400 });
+    if (typeof bid.value !== "number" || isNaN(bid.value) || bid.value < 0) {
+      return NextResponse.json({ error: "Bids must be non-negative numbers" }, { status: 400 });
+    }
+    if (bid.value > rentTotal * 2) {
+      return NextResponse.json({ error: "Bid exceeds reasonable maximum" }, { status: 400 });
+    }
+    if (!validRoomIds.has(bid.roomId)) {
+      return NextResponse.json({ error: "Invalid room" }, { status: 400 });
     }
   }
 
-  // Upsert bids (allows re-submission before auction closes)
+  // Verify all 3 rooms are covered (no duplicates, no missing)
+  const biddedRooms = new Set(bids.map((b) => b.roomId));
+  if (biddedRooms.size !== 3) {
+    return NextResponse.json({ error: "Must bid on each room exactly once" }, { status: 400 });
+  }
+
+  // Upsert bids
   for (const bid of bids) {
     const { error } = await supabase
       .from("bids")
@@ -42,13 +67,13 @@ export async function POST(request: NextRequest) {
         {
           participant_id: participant.id,
           room_id: bid.roomId,
-          value: bid.value,
+          value: Math.round(bid.value * 100) / 100,
         },
         { onConflict: "participant_id,room_id" }
       );
 
     if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ error: "Failed to save bid" }, { status: 500 });
     }
   }
 

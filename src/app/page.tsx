@@ -58,6 +58,12 @@ export default function Home() {
       }
 
       const data = await res.json();
+      // Store participant tokens in localStorage so the dashboard can show invite links
+      // without exposing tokens via API
+      localStorage.setItem(
+        `auction_participants_${data.auctionId}`,
+        JSON.stringify(data.participants)
+      );
       router.push(`/auction/${data.auctionId}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
@@ -79,7 +85,12 @@ export default function Home() {
             </div>
             <span className="font-semibold text-zinc-900 text-lg tracking-tight">Apt Divider</span>
           </div>
-          <span className="text-xs text-zinc-400 font-medium">Envy-Free Room Auction</span>
+          <div className="flex items-center gap-4">
+            <a href="/about" className="text-xs text-zinc-400 hover:text-zinc-600 font-medium transition-colors">
+              How it works
+            </a>
+            <span className="text-xs text-zinc-400 font-medium">Envy-Free Room Auction</span>
+          </div>
         </div>
       </header>
 

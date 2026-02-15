@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { ROOM_DEFINITIONS } from "@/lib/rooms";
+import { randomBytes } from "crypto";
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
@@ -9,22 +10,34 @@ export async function POST(request: NextRequest) {
     participants: { name: string; email: string }[];
   };
 
-  if (!rentTotal || rentTotal <= 0) {
-    return NextResponse.json({ error: "Invalid rent total" }, { status: 400 });
+  // Validate rent total
+  if (!rentTotal || typeof rentTotal !== "number" || rentTotal <= 0 || rentTotal > 100000) {
+    return NextResponse.json({ error: "Rent must be between $1 and $100,000" }, { status: 400 });
   }
-  if (!participantList || participantList.length !== 3) {
+
+  // Validate participants
+  if (!participantList || !Array.isArray(participantList) || participantList.length !== 3) {
     return NextResponse.json({ error: "Exactly 3 participants required" }, { status: 400 });
+  }
+
+  for (const p of participantList) {
+    if (!p.name || typeof p.name !== "string" || p.name.trim().length === 0 || p.name.trim().length > 100) {
+      return NextResponse.json({ error: "Invalid participant name" }, { status: 400 });
+    }
+    if (!p.email || typeof p.email !== "string" || !/\S+@\S+\.\S+/.test(p.email.trim())) {
+      return NextResponse.json({ error: "Invalid participant email" }, { status: 400 });
+    }
   }
 
   // Create auction
   const { data: auction, error: auctionError } = await supabase
     .from("auctions")
-    .insert({ rent_total: rentTotal })
+    .insert({ rent_total: Math.round(rentTotal * 100) / 100 })
     .select()
     .single();
 
   if (auctionError || !auction) {
-    return NextResponse.json({ error: auctionError?.message || "Failed to create auction" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to create auction" }, { status: 500 });
   }
 
   // Create rooms
@@ -38,14 +51,15 @@ export async function POST(request: NextRequest) {
 
   const { error: roomError } = await supabase.from("rooms").insert(roomInserts);
   if (roomError) {
-    return NextResponse.json({ error: roomError.message }, { status: 500 });
+    return NextResponse.json({ error: "Failed to create rooms" }, { status: 500 });
   }
 
-  // Create participants
+  // Create participants with cryptographically secure tokens
   const participantInserts = participantList.map((p) => ({
     auction_id: auction.id,
-    name: p.name,
-    email: p.email,
+    name: p.name.trim().slice(0, 100),
+    email: p.email.trim().toLowerCase().slice(0, 254),
+    access_token: randomBytes(32).toString("hex"),
   }));
 
   const { data: participants, error: participantError } = await supabase
@@ -54,7 +68,7 @@ export async function POST(request: NextRequest) {
     .select();
 
   if (participantError || !participants) {
-    return NextResponse.json({ error: participantError?.message || "Failed to create participants" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to create participants" }, { status: 500 });
   }
 
   return NextResponse.json({

@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams } from "next/navigation";
-import { supabase } from "@/lib/supabase";
 import { Auction, Participant, Room } from "@/lib/types";
 import FloorplanViewer from "@/components/FloorplanViewer";
 import BidForm from "@/components/BidForm";
@@ -17,55 +16,35 @@ export default function BidPage() {
   const [loading, setLoading] = useState(true);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState("");
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchData = useCallback(async () => {
-    const { data: p } = await supabase
-      .from("participants")
-      .select()
-      .eq("access_token", token)
-      .single();
-
-    if (!p) {
-      setError("Invalid bidding link.");
-      setLoading(false);
-      return;
+    try {
+      const res = await fetch(`/api/participant?token=${encodeURIComponent(token)}`);
+      if (!res.ok) {
+        setError("Invalid bidding link.");
+        setLoading(false);
+        return;
+      }
+      const data = await res.json();
+      setParticipant(data.participant);
+      setSubmitted(data.participant.has_submitted);
+      setAuction(data.auction);
+      setRooms(data.rooms);
+    } catch {
+      // network error — will retry on next poll
     }
-
-    setParticipant(p);
-    setSubmitted(p.has_submitted);
-
-    const [auctionRes, roomsRes] = await Promise.all([
-      supabase.from("auctions").select().eq("id", p.auction_id).single(),
-      supabase.from("rooms").select().eq("auction_id", p.auction_id).order("sort_order"),
-    ]);
-
-    if (auctionRes.data) setAuction(auctionRes.data);
-    if (roomsRes.data) setRooms(roomsRes.data);
     setLoading(false);
   }, [token]);
 
   useEffect(() => {
     fetchData();
-  }, [fetchData]);
-
-  useEffect(() => {
-    if (!participant) return;
-
-    const channel = supabase
-      .channel(`bid-${token}`)
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "auctions", filter: `id=eq.${participant.auction_id}` },
-        (payload) => {
-          setAuction(payload.new as Auction);
-        }
-      )
-      .subscribe();
-
+    // Poll every 5 seconds for auction status updates
+    pollRef.current = setInterval(fetchData, 5000);
     return () => {
-      supabase.removeChannel(channel);
+      if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [participant, token]);
+  }, [fetchData]);
 
   const handleSubmit = async (bids: { roomId: string; value: number }[]) => {
     const res = await fetch("/api/bid", {
@@ -121,7 +100,10 @@ export default function BidPage() {
             </div>
             <span className="font-semibold text-zinc-900 text-lg tracking-tight">Apt Divider</span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            <a href="/about" className="text-xs text-zinc-400 hover:text-zinc-600 font-medium transition-colors">
+              How it works
+            </a>
             <span className="text-sm font-mono text-zinc-500 bg-zinc-100 px-3 py-1 rounded-full">
               ${rentTotal.toLocaleString()}/mo
             </span>

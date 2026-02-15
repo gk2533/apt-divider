@@ -4,13 +4,28 @@ import { solveRentDivision } from "@/lib/solver";
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
-  const { auctionId } = body as { auctionId: string };
+  const { auctionId, token } = body as { auctionId: string; token?: string };
 
-  if (!auctionId) {
-    return NextResponse.json({ error: "Missing auctionId" }, { status: 400 });
+  if (!auctionId || typeof auctionId !== "string") {
+    return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }
 
-  // Fetch auction
+  // Authorization: require a valid participant token for this auction
+  if (!token || typeof token !== "string") {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { data: caller } = await supabase
+    .from("participants")
+    .select("auction_id")
+    .eq("access_token", token)
+    .single();
+
+  if (!caller || caller.auction_id !== auctionId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Fetch auction with row-level lock check
   const { data: auction, error: aErr } = await supabase
     .from("auctions")
     .select()
@@ -25,7 +40,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Auction already completed" }, { status: 400 });
   }
 
-  // Fetch rooms ordered by sort_order
+  // Fetch rooms
   const { data: rooms } = await supabase
     .from("rooms")
     .select()
@@ -33,7 +48,7 @@ export async function POST(request: NextRequest) {
     .order("sort_order");
 
   if (!rooms || rooms.length !== 3) {
-    return NextResponse.json({ error: "Rooms not found" }, { status: 500 });
+    return NextResponse.json({ error: "Invalid auction configuration" }, { status: 500 });
   }
 
   // Fetch participants
@@ -43,12 +58,11 @@ export async function POST(request: NextRequest) {
     .eq("auction_id", auctionId);
 
   if (!participants || participants.length !== 3) {
-    return NextResponse.json({ error: "Need exactly 3 participants" }, { status: 500 });
+    return NextResponse.json({ error: "Invalid auction configuration" }, { status: 500 });
   }
 
   // Check all have submitted
-  const allSubmitted = participants.every((p) => p.has_submitted);
-  if (!allSubmitted) {
+  if (!participants.every((p) => p.has_submitted)) {
     return NextResponse.json({ error: "Not all participants have submitted bids" }, { status: 400 });
   }
 
@@ -56,16 +70,13 @@ export async function POST(request: NextRequest) {
   const { data: allBids } = await supabase
     .from("bids")
     .select()
-    .in(
-      "participant_id",
-      participants.map((p) => p.id)
-    );
+    .in("participant_id", participants.map((p) => p.id));
 
   if (!allBids) {
     return NextResponse.json({ error: "Failed to fetch bids" }, { status: 500 });
   }
 
-  // Build bids matrix: bids[participantIdx][roomIdx]
+  // Build bids matrix
   const roomIds = rooms.map((r) => r.id);
   const participantIds = participants.map((p) => p.id);
 
@@ -84,10 +95,9 @@ export async function POST(request: NextRequest) {
     roomIds,
   });
 
-  // Clear old results
+  // Clear old results and store new
   await supabase.from("results").delete().eq("auction_id", auctionId);
 
-  // Store results
   const resultInserts = result.assignment.map((a) => ({
     auction_id: auctionId,
     participant_id: a.participantId,
@@ -98,7 +108,7 @@ export async function POST(request: NextRequest) {
 
   const { error: rErr } = await supabase.from("results").insert(resultInserts);
   if (rErr) {
-    return NextResponse.json({ error: rErr.message }, { status: 500 });
+    return NextResponse.json({ error: "Failed to save results" }, { status: 500 });
   }
 
   // Mark auction as completed
